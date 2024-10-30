@@ -752,7 +752,7 @@ class BLE_Session(object):
         self._dbus_lock = asyncio.Lock()
         self.running = threading.Lock()
         self.running.acquire()
-        self.last_flush = datetime.datetime.utcnow()
+        self.last_flush = datetime.datetime.now(datetime.timezone.utc)
         self.live_report = False
         self.live_count = defaultdict(int)
         self.start_time = None
@@ -857,7 +857,7 @@ class BLE_Session(object):
         #print(sender, len(data), data)
         results = self.devices[address]['decode'](data)
         for r in results:
-            m = (datetime.datetime.utcnow(), address, r)
+            m = (datetime.datetime.now(datetime.timezone.utc), address, r)
             self.messages.put(m)
             self.reporting(address, r[2])
             self.devices[address]['lastseen'] = m[0]
@@ -882,7 +882,7 @@ class BLE_Session(object):
                     yield m
             except queue.Empty:
                 break
-        self.last_flush = datetime.datetime.utcnow()
+        self.last_flush = datetime.datetime.now(datetime.timezone.utc)
         if clear_count:
             self.live_count = defaultdict(int)
         for address in self.recycle:
@@ -939,7 +939,7 @@ class BLE_Session(object):
                 start = self.start_time
             else:
                 start = self.last_flush
-            seconds = int((datetime.datetime.utcnow() - start).total_seconds())
+            seconds = int((datetime.datetime.now(datetime.timezone.utc) - start).total_seconds())
             report = '    '.join('{}: {}'.format(*kv) for kv in sorted(self.live_count.items()))
             report = 'seconds: {}    '.format(seconds) + report
             width = shutil.get_terminal_size()[0]
@@ -1007,7 +1007,7 @@ def load_ini(path):
         d = config['DEFAULT']['duration'].lower().strip()
         if d == 'manual':
             return config
-        n = float(re.match('[0123456789\.]+', d).group(0))
+        n = float(re.match('[0123456789.]+', d).group(0))
         if 'minute' in d:
             n *= 60
         config['DEFAULT']['duration'] = str(n)
@@ -1222,7 +1222,7 @@ def main(args):
                 else:
                     wait_fn = lambda: time.sleep(float(conf['DEFAULT']['duration']))
                     clear_count = False
-                    session.start_time = datetime.datetime.utcnow()
+                    session.start_time = datetime.datetime.now(datetime.timezone.utc)
                 while session.is_running():
                     wait_fn()
                     start_time = session.last_flush
