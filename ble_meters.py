@@ -752,7 +752,7 @@ class BLE_Session(object):
         self._dbus_lock = asyncio.Lock()
         self.running = threading.Lock()
         self.running.acquire()
-        self.last_flush = datetime.datetime.utcnow()
+        self.last_flush = datetime.datetime.now(datetime.UTC)
         self.live_report = False
         self.live_count = defaultdict(int)
         self.start_time = None
@@ -796,7 +796,6 @@ class BLE_Session(object):
             return
         try:
             async with BleakClient(address, timeout=20) as client:
-                d['client'] = client
                 await client.start_notify(d['uuid'], d['cb'])
                 await asyncio.sleep(0.5)
                 self._dbus_lock.release()
@@ -809,13 +808,20 @@ class BLE_Session(object):
                     await self._poll_device(client, d)
                 while self.is_running():
                     await asyncio.sleep(0.1)
+                    if self.devices[address]['lastseen'] != 0 and (datetime.datetime.now(datetime.UTC) - self.devices[address]['lastseen']).total_seconds() > 2:
+                        self.devices[address]['lastseen'] = 0
+                        raise asyncio.exceptions.TimeoutError("Lost connection to device")
                 if 'stop_msg' in d:
                     rep = 'response' in d['stop_msg'] and d['stop_msg']['response']
                     await client.write_gatt_char(d['stop_msg']['uuid'], d['stop_msg']['payload'], response=rep)
                     await asyncio.sleep(d['stop_msg']['sleep'])
                 await client.stop_notify(d['uuid'])
-        except bleak.exc.BleakError:
-            await self._messy_cleanup(address)
+        except bleak.exc.BleakError as e:
+            print('BleakError:', e)
+            if self._dbus_lock.locked():
+                self._dbus_lock.release()
+            await asyncio.sleep(2)
+            await self._connect_to_device(address)
         except asyncio.exceptions.TimeoutError:
             if self._dbus_lock.locked():
                 self._dbus_lock.release()
@@ -823,8 +829,11 @@ class BLE_Session(object):
                 print('TIMEOUT: "%s" retrying....' % self.devices[address]['alias'])
             else:
                 print('TIMEOUT:', address, 'retrying....')
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)
             await self._connect_to_device(address)
+        except Exception as e:
+            print('Unknown exception:', e)
+            await self._messy_cleanup(address)
     async def _messy_cleanup(self, address):
         d = self.devices[address]
         if self._dbus_lock.locked():
@@ -836,11 +845,6 @@ class BLE_Session(object):
                 print('ERROR: unable to connect to "%s"' % d['alias'], address)
             else:
                 print('ERROR: unable to connect to', address)
-        if d['client']:
-            try:
-                await d['client'].stop_notify(d['uuid'])
-            except bleak.exc.BleakError:
-                pass
     async def _run(self):
         tasks = [self._connect_to_device(address) for address in self.devices]
         await asyncio.gather(*tasks)
@@ -857,7 +861,7 @@ class BLE_Session(object):
         #print(sender, len(data), data)
         results = self.devices[address]['decode'](data)
         for r in results:
-            m = (datetime.datetime.utcnow(), address, r)
+            m = (datetime.datetime.now(datetime.UTC), address, r)
             self.messages.put(m)
             self.reporting(address, r[2])
             self.devices[address]['lastseen'] = m[0]
@@ -882,7 +886,7 @@ class BLE_Session(object):
                     yield m
             except queue.Empty:
                 break
-        self.last_flush = datetime.datetime.utcnow()
+        self.last_flush = datetime.datetime.now(datetime.UTC)
         if clear_count:
             self.live_count = defaultdict(int)
         for address in self.recycle:
@@ -939,7 +943,7 @@ class BLE_Session(object):
                 start = self.start_time
             else:
                 start = self.last_flush
-            seconds = int((datetime.datetime.utcnow() - start).total_seconds())
+            seconds = int((datetime.datetime.now(datetime.UTC) - start).total_seconds())
             report = '    '.join('{}: {}'.format(*kv) for kv in sorted(self.live_count.items()))
             report = 'seconds: {}    '.format(seconds) + report
             width = shutil.get_terminal_size()[0]
@@ -1007,7 +1011,7 @@ def load_ini(path):
         d = config['DEFAULT']['duration'].lower().strip()
         if d == 'manual':
             return config
-        n = float(re.match('[0123456789\.]+', d).group(0))
+        n = float(re.match('[0123456789.]+', d).group(0))
         if 'minute' in d:
             n *= 60
         config['DEFAULT']['duration'] = str(n)
@@ -1222,7 +1226,7 @@ def main(args):
                 else:
                     wait_fn = lambda: time.sleep(float(conf['DEFAULT']['duration']))
                     clear_count = False
-                    session.start_time = datetime.datetime.utcnow()
+                    session.start_time = datetime.datetime.now(datetime.UTC)
                 while session.is_running():
                     wait_fn()
                     start_time = session.last_flush
