@@ -16,6 +16,8 @@ import re
 from collections import defaultdict
 from collections import namedtuple
 import shutil
+import paho.mqtt.client as mqtt
+import json
 
 # this list is only used for autodetection
 known_devices = [
@@ -1138,6 +1140,23 @@ def main(args):
         print('ERROR: no supported meters found.')
         sys.exit(1)
 
+    mqttc = None
+    if 'MQTT' in conf and 'Host' in conf['MQTT']:
+        mqtt_conf = conf['MQTT']
+        mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, clean_session=True)
+        mqttc.username_pw_set(
+                mqtt_conf.get('Username', None),
+                mqtt_conf.get('Password', None)
+            )
+        if mqtt_conf.getboolean('Tls', fallback=False):
+            mqttc.tls_set()
+            mqttc.tls_insecure_set(True)
+        mqttc.connect_async(
+                mqtt_conf['Host'],
+                mqtt_conf.getint('Port', 1883)
+            )
+        mqttc.loop_start()
+
     auto_warning = True
     session.start()
     print('Waiting for meters....')
@@ -1162,7 +1181,7 @@ def main(args):
     #if conf['DEFAULT']['mode'] == 'live' or conf['DEFAULT']['duration'] != 'manual':
     #    input('Press ENTER to begin logging data.')
     keyboard_prev = {}
-    keyboard_needed = any(conf[name]['Type'].startswith('keyboard') for name in conf if name != 'DEFAULT')
+    keyboard_needed = any(conf[name]['Type'].startswith('keyboard') for name in conf if name not in ['DEFAULT', 'MQTT'])
 
     # put off creating the file as long as possible to make it startup failures less annoying
     if args.output:
@@ -1202,12 +1221,13 @@ def main(args):
             if conf['DEFAULT']['mode'] == 'live':
                 for m in session.message_iter():
                     timestamp, address, data = m
-                    lcd, n, units = data
+                    lcd, value, units = data
                     if lcd is None:
                         continue
                     if auto_warning and 'auto_off' in lcd:
                         print('WARNING: Automatic power off is enabled')
                         auto_warning = False
+                    n = value
                     if type(n) == float:
                         n = format(n, '.4g')
                     alias = session.devices[address]['alias']
@@ -1215,6 +1235,16 @@ def main(args):
                     row = {'timestamp':str(timestamp), 'address':address, 'value':str(n), 'unit':units, 'name':alias, 'model':model}
                     logging_csv.writerow(row)
                     logging_fh.flush()
+                    if mqttc:
+                        mqtt_topic = conf['MQTT'].get('Namespace', 'ble_meters') + '/' + alias
+                        mqtt_row = {
+                                'timestamp': timestamp.timestamp(),
+                                'address': address,
+                                'value': value,
+                                'unit': units,
+                                'model': model
+                            }
+                        mqttc.publish(mqtt_topic , json.dumps(mqtt_row))
             if conf['DEFAULT']['mode'] == 'summary':
                 if conf['DEFAULT']['duration'] == 'manual':
                     wait_fn = manual_wait
@@ -1241,7 +1271,7 @@ def main(args):
                     if keyboard_needed:
                         print('Manual entries for previous data point:')
                     for name in conf:
-                        if name == 'DEFAULT':
+                        if name in ['DEFAULT', 'MQTT']:
                             continue
                         if not conf[name]['Type'].startswith('keyboard'):
                             continue
